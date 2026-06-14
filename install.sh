@@ -328,10 +328,14 @@ done
 cp /etc/resolv.conf /mnt/etc/ 2>/dev/null || true
 
 # Créer le script de configuration pour le chroot
-cat > /mnt/tmp/setup.sh << 'CHROOT_SETUP_EOF'
+cat > /mnt/tmp/setup.sh << CHROOT_SETUP_EOF
 #!/usr/bin/env bash
 set -euo pipefail
 trap 'echo "CHROOT ERROR at line $LINENO" >&2' ERR
+
+# Valeurs par défaut
+LOCALE="${LOCALE:-en_US.UTF-8}"
+BTRFS_OPTS="${BTRFS_OPTS:-rw,noatime,compress=zstd,discard=async}"
 
 log() { echo "[chroot $(date +%T)] $*"; }
 
