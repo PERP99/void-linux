@@ -2,12 +2,12 @@
 set -eu
 
 # ============================================
-# VÉRIFICATIONS
+# VÉRIFICATIONS INITIALES
 # ============================================
 [ "$EUID" -ne 0 ] && { echo "❌ Root requis !"; exit 1; }
-[ ! -f /etc/os-release ] && { echo "❌ Live CD Void requis !"; exit 1; }
+[ ! -f /etc/os-release ] && { echo "❌ Live CD Void Linux requis !"; exit 1; }
 
-# Charger les modules noyau
+# Charger les modules noyau nécessaires
 modprobe dm-crypt 2>/dev/null || true
 
 # ============================================
@@ -134,14 +134,12 @@ size=+$BOOT_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=Boot
 type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=Root
 EOF
 
-# ============================================
-# NOUVEAU : Vérification SIMPLE et FIABLE
-# ============================================
-print_step "Synchronisation des partitions avec le noyau..."
+# Synchronisation avec le noyau
+print_step "Synchronisation des partitions..."
 partprobe "$DISK" 2>/dev/null || true
-udevadm settle --timeout=10 2>/dev/null || sleep 5
+udevadm settle --timeout=5 2>/dev/null || sleep 3
 
-# Détection du format (nvme vs sda) - CORRIGÉ
+# Détection du format (nvme vs sda)
 if [ -e "${DISK}p1" ]; then
   EFI_PART="${DISK}p1"
   BOOT_PART="${DISK}p2"
@@ -152,39 +150,55 @@ elif [ -e "${DISK}1" ]; then
   ROOT_PART="${DISK}3"
 else
   echo "❌ Impossible de détecter les partitions !"
-  echo "Vérifie avec : lsblk $DISK"
+  lsblk "$DISK"
   exit 1
 fi
 
-# Vérification ULTRA-ROBUSTE : on vérifie que les fichiers device EXISTENT
-[ ! -b "$EFI_PART" ] && { echo "❌ $EFI_PART n'existe pas (vérifie avec ls -l $EFI_PART)"; exit 1; }
-[ ! -b "$BOOT_PART" ] && { echo "❌ $BOOT_PART n'existe pas (vérifie avec ls -l $BOOT_PART)"; exit 1; }
-[ ! -b "$ROOT_PART" ] && { echo "❌ $ROOT_PART n'existe pas (vérifie avec ls -l $ROOT_PART)"; exit 1; }
+# Vérification ULTRA-ROBUSTE
+[ ! -b "$EFI_PART" ] && { echo "❌ $EFI_PART introuvable !"; exit 1; }
+[ ! -b "$BOOT_PART" ] && { echo "❌ $BOOT_PART introuvable !"; exit 1; }
+[ ! -b "$ROOT_PART" ] && { echo "❌ $ROOT_PART introuvable !"; exit 1; }
 
-print_step "Partitions détectées :"
-print_step "  EFI : $EFI_PART"
-print_step "  Boot : $BOOT_PART"
-print_step "  Racine : $ROOT_PART"
+print_step "Partitions détectées : $EFI_PART, $BOOT_PART, $ROOT_PART"
 
 # ============================================
-# 6. CHIFFREMENT LUKS
+# 6. CHIFFREMENT LUKS (NOUVELLE VERSION AVEC NETTOYAGE)
 # ============================================
 print_title "CHIFFREMENT LUKS"
-print_step "Vérification finale que $ROOT_PART existe et est accessible..."
-[ ! -b "$ROOT_PART" ] && { echo "❌ $ROOT_PART n'est PAS un device block valide !"; ls -l "$ROOT_PART"; exit 1; }
 
-print_step "Chiffrement de $ROOT_PART..."
-echo -e "$LUKS_PWD\\n$LUKS_PWD" | cryptsetup luksFormat --type luks1 -y "$ROOT_PART" - || {
+# VÉRIFICATION CRUCIALE : la partition a-t-elle déjà une signature LUKS ?
+if cryptsetup isLuks "$ROOT_PART" 2>/dev/null; then
+  print_step "⚠️  $ROOT_PART contient DÉJÀ une signature LUKS !"
+  print_step "Cela vient probablement d'une tentative précédente."
+  confirm "EFFACER la signature existante et recommencer ? (TOUTES LES DONNÉES SERONT PERDUES) !" || exit 1
+  print_step "Nettoyage de la signature LUKS existante..."
+  cryptsetup erase "$ROOT_PART" - || {
+    echo "❌ Échec du nettoyage ! Essaie manuellement :"
+    echo "  cryptsetup erase $ROOT_PART"
+    exit 1
+  }
+  sleep 2
+  print_step "Signature LUKS supprimée. Prêt pour le chiffrement."
+fi
+
+# Vérification finale
+[ ! -b "$ROOT_PART" ] && { echo "❌ $ROOT_PART introuvable !"; exit 1; }
+
+print_step "Chiffrement de $ROOT_PART (cela peut prendre du temps)..."
+echo -e "$LUKS_PWD\\n$LUKS_PWD" | cryptsetup luksFormat --type luks1 --batch-mode "$ROOT_PART" - || {
   echo "❌ Échec du chiffrement LUKS !"
-  echo "Essaie manuellement :"
-  echo "  cryptsetup luksFormat $ROOT_PART"
+  echo "Solutions :"
+  echo "  1. Vérifie que cryptsetup est installé : xbps-install -y cryptsetup"
+  echo "  2. Essaie manuellement : cryptsetup luksFormat --batch-mode $ROOT_PART"
+  echo "  3. Si la partition a une signature : cryptsetup erase $ROOT_PART"
   exit 1
 }
 
 print_step "Ouverture du conteneur LUKS..."
 echo "$LUKS_PWD" | cryptsetup open "$ROOT_PART" cryptroot - || {
   echo "❌ Échec de l'ouverture LUKS !"
-  echo "Mot de passe incorrect ou partition corrompue."
+  echo "  - Mot de passe incorrect ?"
+  echo "  - Partition corrompue ? Essaie : cryptsetup repair $ROOT_PART"
   exit 1
 }
 
@@ -226,12 +240,13 @@ df -h | grep /mnt
 # ============================================
 # 8. INSTALLATION
 # ============================================
-print_title "INSTALLATION"
+print_title "INSTALLATION DU SYSTÈME DE BASE"
 mkdir -p /mnt/var/db/xbps/keys
 cp /var/db/xbps/keys/* /mnt/var/db/xbps/keys/ 2>/dev/null || echo "⚠️ Aucune clé XBPS trouvée"
 
 XBPS_ARCH="$ARCH" xbps-install -S -R "$REPO" -r /mnt base-system linux-mainline btrfs-progs cryptsetup vim sudo || {
   echo "❌ Échec installation des paquets !"
+  echo "Vérifie ta connexion internet et le miroir : $REPO"
   exit 1
 }
 
@@ -248,10 +263,12 @@ cp /etc/resolv.conf /mnt/etc/ 2>/dev/null || echo "⚠️ /etc/resolv.conf intro
 export TIMEZONE HOSTNAME USERNAME LOCALE ROOT_PWD USER_PWD LUKS_PWD EFI_PART BOOT_PART BTRFS_OPTS
 
 chroot /mnt /bin/bash <<'CHROOT_EOF'
+# Timezone et Locale
 ln -sf /usr/share/zoneinfo/"$TIMEZONE" /etc/localtime
 sed -i "s|#$LOCALE|$LOCALE|" /etc/default/libc-locales
 xbps-reconfigure -f glibc-locales 2>/dev/null || echo "⚠️ Erreur locale"
 
+# Hostname
 echo "$HOSTNAME" > /etc/hostname
 cat > /etc/hosts <<HOSTSEOF
 127.0.0.1        localhost
@@ -259,17 +276,25 @@ cat > /etc/hosts <<HOSTSEOF
 127.0.1.1        $HOSTNAME.localdomain $HOSTNAME
 HOSTSEOF
 
+# Utilisateurs
 echo "root:$ROOT_PWD" | chpasswd
 useradd -m -G wheel -s /bin/bash "$USERNAME"
 echo "$USERNAME:$USER_PWD" | chpasswd
+
+# Sudo
 echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
 
+# Dépôts
 xbps-install -S
 xbps-install -y void-repo-nonfree 2>/dev/null || echo "⚠️ nonfree introuvable"
 xbps-install -S
 xbps-install -y void-repo-multilib 2>/dev/null || echo "⚠️ multilib introuvable"
 xbps-install -S
 
+# intel-ucode
+xbps-install -Su intel-ucode 2>/dev/null || echo "⚠️ intel-ucode introuvable"
+
+# fstab
 EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
 BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART")
 ROOT_UUID=$(blkid -s UUID -o value /dev/mapper/cryptroot)
@@ -282,14 +307,16 @@ UUID=$EFI_UUID /efi vfat defaults,noatime 0 2
 tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0
 FSTABEOF
 
+# GRUB avec support LUKS
 echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
 sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=""/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=4 rd.auto=1 rd.luks.allow-discards"/' /etc/default/grub
 xbps-install -y grub-x86_64-efi 2>/dev/null || echo "⚠️ grub introuvable"
 grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id="Void" 2>/dev/null || {
-  echo "❌ Échec GRUB !"
+  echo "❌ Échec installation GRUB !"
   exit 1
 }
 
+# Services
 echo "hostonly=yes" >> /etc/dracut.conf
 ln -s /etc/sv/dhcpcd /var/service/ 2>/dev/null || echo "⚠️ dhcpcd introuvable"
 ln -s /etc/sv/NetworkManager /var/service/ 2>/dev/null || echo "⚠️ NetworkManager introuvable"
@@ -301,8 +328,23 @@ CHROOT_EOF
 # 10. FINALISATION
 # ============================================
 print_title "FINALISATION"
+print_step "Démontage des partitions..."
 umount -R /mnt 2>/dev/null || echo "⚠️ Avertissement démontage"
-cryptsetup close cryptroot 2>/dev/null || echo "⚠️ Avertissement LUKS"
 
-echo -e "\n✅ INSTALLATION TERMINÉE ! Redémarre avec: reboot\n"
+print_step "Fermeture du conteneur LUKS..."
+cryptsetup close cryptroot 2>/dev/null || echo "⚠️ Avertissement fermeture LUKS"
+
+echo -e "\n=========================================="
+echo "  ✅ INSTALLATION TERMINÉE AVEC SUCCÈS !"
+echo "=========================================="
+echo ""
+echo "  Pour démarrer :"
+echo "  1. Redémarre : reboot"
+echo "  2. Au boot, entre le mot de passe LUKS"
+echo "  3. Connecte-toi avec :"
+echo "     - Utilisateur : $USERNAME"
+echo "     - Mot de passe : [celui que tu as configuré]"
+echo "=========================================="
+echo ""
+
 confirm "Redémarrer maintenant ?" && reboot
