@@ -37,7 +37,6 @@ cleanup() {
   echo -e "\n🔄 Nettoyage avant sortie..."
   umount -R /mnt 2>/dev/null || true
   cryptsetup close cryptroot 2>/dev/null || true
-  rm -f "$LUKS_KEYFILE" 2>/dev/null || true
   echo "✅ Nettoyage terminé"
 }
 
@@ -170,33 +169,18 @@ if cryptsetup isLuks "$ROOT_PART" 2>/dev/null; then
   sleep 2
 fi
 
-# CRÉATION D'UN FICHIER TEMPORAIRE SÉCURISÉ
-LUKS_KEYFILE=$(mktemp -p /tmp)
-echo "$LUKS_PWD" > "$LUKS_KEYFILE"
-chmod 600 "$LUKS_KEYFILE"
-
 print_step "Chiffrement de $ROOT_PART..."
-cryptsetup luksFormat --type luks1 --key-file "$LUKS_KEYFILE" "$ROOT_PART" - || {
-  rm -f "$LUKS_KEYFILE"
+echo -n "$LUKS_PWD" | cryptsetup luksFormat --type luks2 --pbkdf argon2id - "$ROOT_PART" - || {
   echo "❌ Échec chiffrement LUKS !"
   exit 1
 }
 
 print_step "Ouverture du conteneur LUKS..."
-cryptsetup open --key-file "$LUKS_KEYFILE" "$ROOT_PART" cryptroot || {
-  rm -f "$LUKS_KEYFILE"
+echo -n "$LUKS_PWD" | cryptsetup open "$ROOT_PART" cryptroot - || {
   echo "❌ Échec ouverture LUKS !"
-  echo "Essaie manuellement avec --key-file"
   exit 1
 }
 
-print_step "Ajout du mot de passe LUKS..."
-echo "$LUKS_PWD" | cryptsetup luksAddKey --key-file "$LUKS_KEYFILE" "$ROOT_PART" - || {
-  echo "❌ Échec ajout mot de passe LUKS !"
-  exit 1
-}
-
-rm -f "$LUKS_KEYFILE"
 print_step "LUKS configuré avec succès."
 
 # ============================================
