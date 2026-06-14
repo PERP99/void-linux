@@ -86,7 +86,6 @@ if [[ $REPLY =~ ^[OoYy]$ ]]; then
     echo "❌ Erreur"
   done
 else
-  # Mot de passe root
   while true; do
     read -sp "Mot de passe root : " pwd1
     echo
@@ -96,7 +95,6 @@ else
     echo "❌ Erreur"
   done
 
-  # Mot de passe LUKS
   while true; do
     read -sp "Mot de passe LUKS : " pwd1
     echo
@@ -106,7 +104,6 @@ else
     echo "❌ Erreur"
   done
 
-  # Mot de passe utilisateur
   while true; do
     read -sp "Mot de passe $USERNAME : " pwd1
     echo
@@ -118,16 +115,15 @@ else
 fi
 
 # ============================================
-# 5. PARTITIONNEMENT
+# 5. PARTITIONNEMENT (sfdisk SEULEMENT)
 # ============================================
 print_title "PARTITIONNEMENT"
-echo "  - EFI ($EFI_SIZE, FAT32)"
-echo "  - Boot ($BOOT_SIZE, ext2)"
-echo "  - Racine (LUKS + BTRFS)"
+echo "  - Partition 1 : EFI ($EFI_SIZE, FAT32)"
+echo "  - Partition 2 : Boot ($BOOT_SIZE, ext2)"
+echo "  - Partition 3 : Racine (LUKS + BTRFS)"
 confirm "Continuer ?" || exit 1
 
-# Création des partitions
-parted -s "$DISK" mklabel gpt
+print_step "Création des partitions avec sfdisk..."
 sfdisk "$DISK" <<EOF
 label: gpt
 start=2048, size=+$EFI_SIZE, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=EFI
@@ -147,13 +143,17 @@ else
   BOOT_PART="${DISK}2"
   ROOT_PART="${DISK}3"
 fi
+print_step "Partitions créées : $EFI_PART, $BOOT_PART, $ROOT_PART"
 
 # ============================================
 # 6. CHIFFREMENT LUKS
 # ============================================
 print_title "CHIFFREMENT LUKS"
+print_step "Chiffrement de $ROOT_PART..."
 echo -e "$LUKS_PWD\\n$LUKS_PWD" | cryptsetup luksFormat --type luks1 -y "$ROOT_PART" -
+print_step "Ouverture du conteneur LUKS..."
 echo "$LUKS_PWD" | cryptsetup open "$ROOT_PART" cryptroot -
+print_step "Formatage des partitions..."
 mkfs.fat -F32 -n EFI "$EFI_PART"
 mkfs.ext2 -L grub "$BOOT_PART"
 mkfs.btrfs -L Void /dev/mapper/cryptroot
@@ -164,7 +164,7 @@ mkfs.btrfs -L Void /dev/mapper/cryptroot
 print_title "MONTAGE"
 mount -o "$BTRFS_OPTS" /dev/mapper/cryptroot /mnt
 
-# Création des subvolumes (CORRIGÉ : un par un)
+# Création des subvolumes (un par un)
 btrfs subvolume create /mnt/@
 btrfs subvolume create /mnt/@home
 btrfs subvolume create /mnt/@snapshots
@@ -192,7 +192,7 @@ cp /var/db/xbps/keys/* /mnt/var/db/xbps/keys/ 2>/dev/null || true
 XBPS_ARCH="$ARCH" xbps-install -S -R "$REPO" -r /mnt base-system linux-mainline btrfs-progs cryptsetup vim sudo
 
 # ============================================
-# 9. CHROOT (CORRIGÉ : export des variables)
+# 9. CHROOT
 # ============================================
 print_title "CONFIGURATION (CHROOT)"
 for dir in dev proc sys run; do
@@ -205,7 +205,7 @@ cp /etc/resolv.conf /mnt/etc/ 2>/dev/null || true
 export TIMEZONE HOSTNAME USERNAME LOCALE ROOT_PWD USER_PWD LUKS_PWD EFI_PART BOOT_PART BTRFS_OPTS
 
 chroot /mnt /bin/bash <<'CHROOT_EOF'
-# Timezone et Locale (CORRIGÉ : délimiteur | pour sed)
+# Timezone et Locale
 ln -sf /usr/share/zoneinfo/"$TIMEZONE" /etc/localtime
 sed -i "s|#$LOCALE|$LOCALE|" /etc/default/libc-locales
 xbps-reconfigure -f glibc-locales 2>/dev/null || true
