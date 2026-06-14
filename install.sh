@@ -271,9 +271,8 @@ tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0
 FSTABEOF
 
 # Configure crypttab for LUKS
-LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")
 cat > /etc/crypttab <<CRYPTABEOF
-cryptroot UUID=$LUKS_UUID none luks,discard
+cryptroot $ROOT_PART none luks,discard
 CRYPTABEOF
 
 echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
