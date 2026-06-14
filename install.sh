@@ -60,9 +60,9 @@ print_step() {
 # Confirmation
 confirm() {
   local prompt="${1:-Confirmer ?}"
-  local answer
-  read -r -p "${prompt} [O/n] " answer
-  [[ "${answer}" =~ ^[OoYy]$ ]]
+  read -p "${prompt} [O/n] " -n 1 -r
+  echo
+  [[ "$REPLY" =~ ^[OoYy]$ ]]
 }
 
 # Nettoyage
