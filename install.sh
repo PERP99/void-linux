@@ -145,10 +145,10 @@ EOF
 partprobe "$DISK" 2>/dev/null || true
 udevadm settle --timeout=5 2>/dev/null || sleep 3
 
-if [ -e "${DISK}p1" ]; then
-  EFI_PART="${DISK}p1"; BOOT_PART="${DISK}p2"; ROOT_PART="${DISK}p3"
-elif [ -e "${DISK}1" ]; then
+if [ -e "${DISK}1" ]; then
   EFI_PART="${DISK}1"; BOOT_PART="${DISK}2"; ROOT_PART="${DISK}3"
+elif [ -e "${DISK}p1" ]; then
+  EFI_PART="${DISK}p1"; BOOT_PART="${DISK}p2"; ROOT_PART="${DISK}p3"
 else
   echo "❌ Partitions introuvables !"; lsblk "$DISK"; exit 1
 fi
@@ -158,7 +158,7 @@ fi
 [ ! -b "$ROOT_PART" ] && { echo "❌ $ROOT_PART introuvable !"; exit 1; }
 
 # ============================================
-# 6. CHIFFREMENT LUKS (VERSION ULTIME - FICHIER TEMPORAIRE)
+# 6. CHIFFREMENT LUKS
 # ============================================
 print_title "CHIFFREMENT LUKS"
 
@@ -180,6 +180,9 @@ echo -n "$LUKS_PWD" | cryptsetup open "$ROOT_PART" cryptroot - || {
   echo "❌ Échec ouverture LUKS !"
   exit 1
 }
+
+# Attendre que /dev/mapper/cryptroot soit disponible
+udevadm settle --timeout=5 2>/dev/null || sleep 3
 
 print_step "LUKS configuré avec succès."
 
@@ -268,9 +271,9 @@ tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0
 FSTABEOF
 
 # Configure crypttab for LUKS
-ROOT_PART_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")
 cat > /etc/crypttab <<CRYPTABEOF
-cryptroot UUID=$ROOT_PART_UUID none luks
+cryptroot UUID=$LUKS_UUID none luks,discard
 CRYPTABEOF
 
 echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
