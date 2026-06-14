@@ -233,7 +233,7 @@ for dir in dev proc sys run; do
 done
 cp /etc/resolv.conf /mnt/etc/ 2>/dev/null || true
 
-export TIMEZONE HOSTNAME USERNAME LOCALE ROOT_PWD USER_PWD LUKS_PWD EFI_PART BOOT_PART BTRFS_OPTS
+export TIMEZONE HOSTNAME USERNAME LOCALE ROOT_PWD USER_PWD LUKS_PWD EFI_PART BOOT_PART ROOT_PART BTRFS_OPTS
 
 chroot /mnt /bin/bash <<'CHROOT_EOF'
 ln -sf /usr/share/zoneinfo/"$TIMEZONE" /etc/localtime
