@@ -180,7 +180,7 @@ cryptsetup open --key-file "$LUKS_KEYFILE" "$ROOT_PART" cryptroot || {
 }
 
 print_step "Ajout du mot de passe LUKS..."
-echo "$LUKS_PWD" | cryptsetup luksAddKey "$ROOT_PART" - || {
+echo "$LUKS_PWD" | cryptsetup luksAddKey --key-file "$LUKS_KEYFILE" "$ROOT_PART" - || {
   echo "❌ Échec ajout mot de passe LUKS !"
   exit 1
 }
