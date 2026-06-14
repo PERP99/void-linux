@@ -32,6 +32,18 @@ confirm() {
   return 0
 }
 
+# Cleanup function to run on exit/error
+cleanup() {
+  echo -e "\n🔄 Nettoyage avant sortie..."
+  umount -R /mnt 2>/dev/null || true
+  cryptsetup close cryptroot 2>/dev/null || true
+  rm -f "$LUKS_KEYFILE" 2>/dev/null || true
+  echo "✅ Nettoyage terminé"
+}
+
+# Set trap for cleanup on exit or error
+trap cleanup EXIT ERR
+
 # ============================================
 # 1. DISQUE
 # ============================================
@@ -162,7 +174,6 @@ fi
 LUKS_KEYFILE=$(mktemp -p /tmp)
 echo "$LUKS_PWD" > "$LUKS_KEYFILE"
 chmod 600 "$LUKS_KEYFILE"
-trap 'rm -f "$LUKS_KEYFILE"' EXIT INT TERM
 
 print_step "Chiffrement de $ROOT_PART..."
 cryptsetup luksFormat --type luks1 --key-file "$LUKS_KEYFILE" "$ROOT_PART" - || {
@@ -294,8 +305,6 @@ CHROOT_EOF
 # 11. FINALISATION
 # ============================================
 print_title "FINALISATION"
-umount -R /mnt 2>/dev/null || true
-cryptsetup close cryptroot 2>/dev/null || true
 
 echo -e "\n✅ INSTALLATION TERMINÉE ! Redémarre avec: reboot\n"
 confirm "Redémarrer maintenant ?" && reboot
