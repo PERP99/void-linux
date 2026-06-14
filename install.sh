@@ -5,7 +5,10 @@ set -eu
 # VÉRIFICATIONS
 # ============================================
 [ "$EUID" -ne 0 ] && { echo "❌ Root requis !"; exit 1; }
-[ ! -f /etc/os-release ] && { echo "❌ Live CD Void requis !"; exit 1; }
+[ ! -f /etc/os-release ] && { echo "❌ Live CD Void Linux requis !"; exit 1; }
+
+# Charger les modules noyau nécessaires
+modprobe dm-crypt 2>/dev/null || true
 
 # ============================================
 # CONFIGURATION
@@ -29,6 +32,23 @@ confirm() {
   echo
   [[ ! $REPLY =~ ^[OoYy]$ ]] && return 1
   return 0
+}
+wait_for_partitions() {
+  local disk="$1"
+  local max_attempts=10
+  local attempt=1
+  print_step "Attente de la détection des partitions..."
+  while [ $attempt -le $max_attempts ]; do
+    if lsblk "$disk" | grep -q "${disk}p3\$"; then
+      print_step "Partitions détectées !"
+      return 0
+    fi
+    print_step "Tentative $attempt/$max_attempts..."
+    udevadm settle --timeout=5 2>/dev/null || sleep 2
+    ((attempt++))
+  done
+  echo "❌ Partitions non détectées après $max_attempts tentatives"
+  return 1
 }
 
 # ============================================
@@ -115,7 +135,7 @@ else
 fi
 
 # ============================================
-# 5. PARTITIONNEMENT (sfdisk SEULEMENT)
+# 5. PARTITIONNEMENT (sfdisk + attente)
 # ============================================
 print_title "PARTITIONNEMENT"
 echo "  - Partition 1 : EFI ($EFI_SIZE, FAT32)"
@@ -124,14 +144,17 @@ echo "  - Partition 3 : Racine (LUKS + BTRFS)"
 confirm "Continuer ?" || exit 1
 
 print_step "Création des partitions avec sfdisk..."
-sfdisk "$DISK" <<EOF
+sfdisk --force "$DISK" <<EOF
 label: gpt
 start=2048, size=+$EFI_SIZE, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=EFI
 size=+$BOOT_SIZE, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=Boot
 type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=Root
 EOF
+
+# Attendre que le noyau détecte les nouvelles partitions
+wait_for_partitions "$DISK" || exit 1
 partprobe "$DISK" 2>/dev/null || true
-sleep 2
+sleep 3
 
 # Détection du format (nvme vs sda)
 if lsblk "$DISK" | grep -q "${DISK}p1"; then
@@ -143,72 +166,125 @@ else
   BOOT_PART="${DISK}2"
   ROOT_PART="${DISK}3"
 fi
+
+# Vérification que les partitions existent
+[ ! -e "$EFI_PART" ] && { echo "❌ Partition EFI $EFI_PART introuvable !"; exit 1; }
+[ ! -e "$BOOT_PART" ] && { echo "❌ Partition Boot $BOOT_PART introuvable !"; exit 1; }
+[ ! -e "$ROOT_PART" ] && { echo "❌ Partition Racine $ROOT_PART introuvable !"; exit 1; }
+
 print_step "Partitions créées : $EFI_PART, $BOOT_PART, $ROOT_PART"
 
 # ============================================
-# 6. CHIFFREMENT LUKS
+# 6. CHIFFREMENT LUKS (avec vérification)
 # ============================================
 print_title "CHIFFREMENT LUKS"
-print_step "Chiffrement de $ROOT_PART..."
-echo -e "$LUKS_PWD\\n$LUKS_PWD" | cryptsetup luksFormat --type luks1 -y "$ROOT_PART" -
+print_step "Vérification que $ROOT_PART existe..."
+[ ! -e "$ROOT_PART" ] && { echo "❌ $ROOT_PART n'existe pas !"; lsblk "$DISK"; exit 1; }
+
+print_step "Chiffrement de $ROOT_PART (cela peut prendre du temps)..."
+echo -e "$LUKS_PWD\\n$LUKS_PWD" | cryptsetup luksFormat --type luks1 -y "$ROOT_PART" - 2>&1 || {
+  echo "❌ Échec du chiffrement LUKS !"
+  echo "Vérifie que :"
+  echo "  - Le disque $DISK est bien sélectionné"
+  echo "  - La partition $ROOT_PART existe (lsblk)"
+  echo "  - cryptsetup est installé (xbps-install -y cryptsetup)"
+  exit 1
+}
+
 print_step "Ouverture du conteneur LUKS..."
-echo "$LUKS_PWD" | cryptsetup open "$ROOT_PART" cryptroot -
+echo "$LUKS_PWD" | cryptsetup open "$ROOT_PART" cryptroot - 2>&1 || {
+  echo "❌ Échec de l'ouverture LUKS !"
+  echo "Mot de passe incorrect ou partition corrompue."
+  exit 1
+}
+
+# Vérification que /dev/mapper/cryptroot existe
+[ ! -e "/dev/mapper/cryptroot" ] && {
+  echo "❌ /dev/mapper/cryptroot introuvable !"
+  ls /dev/mapper/
+  exit 1
+}
+
 print_step "Formatage des partitions..."
-mkfs.fat -F32 -n EFI "$EFI_PART"
-mkfs.ext2 -L grub "$BOOT_PART"
-mkfs.btrfs -L Void /dev/mapper/cryptroot
+mkfs.fat -F32 -n EFI "$EFI_PART" 2>&1 || { echo "❌ Échec formatage EFI !"; exit 1; }
+mkfs.ext2 -L grub "$BOOT_PART" 2>&1 || { echo "❌ Échec formatage Boot !"; exit 1; }
+mkfs.btrfs -L Void /dev/mapper/cryptroot 2>&1 || { echo "❌ Échec formatage BTRFS !"; exit 1; }
 
 # ============================================
-# 7. MONTAGE
+# 7. MONTAGE (avec vérifications)
 # ============================================
 print_title "MONTAGE"
-mount -o "$BTRFS_OPTS" /dev/mapper/cryptroot /mnt
 
-# Création des subvolumes (un par un)
-btrfs subvolume create /mnt/@
-btrfs subvolume create /mnt/@home
-btrfs subvolume create /mnt/@snapshots
+print_step "Montage de la partition racine..."
+mount -o "$BTRFS_OPTS" /dev/mapper/cryptroot /mnt 2>&1 || {
+  echo "❌ Échec montage racine !"
+  echo "Vérifie que /mnt existe et que BTRFS est supporté."
+  exit 1
+}
 
-umount /mnt
-mount -o "$BTRFS_OPTS,subvol=@" /dev/mapper/cryptroot /mnt
+print_step "Création des subvolumes BTRFS..."
+btrfs subvolume create /mnt/@ 2>&1 || { echo "❌ Échec création @ !"; exit 1; }
+btrfs subvolume create /mnt/@home 2>&1 || { echo "❌ Échec création @home !"; exit 1; }
+btrfs subvolume create /mnt/@snapshots 2>&1 || { echo "❌ Échec création @snapshots !"; exit 1; }
 
-# Répertoires et subvolumes supplémentaires
-mkdir -p /mnt/{home,.snapshots,var/cache}
-btrfs subvolume create /mnt/var/cache/xbps
-btrfs subvolume create /mnt/var/tmp
-btrfs subvolume create /mnt/srv
+print_step "Démontage et remontage avec subvolume @..."
+umount /mnt 2>/dev/null || true
+mount -o "$BTRFS_OPTS,subvol=@" /dev/mapper/cryptroot /mnt 2>&1 || {
+  echo "❌ Échec remontage avec subvolume @ !"; exit 1
+}
 
-# Montage EFI et Boot
-mkdir -p /mnt/{efi,boot}
-mount -o rw,noatime "$EFI_PART" /mnt/efi
-mount -o rw,noatime "$BOOT_PART" /mnt/boot
+print_step "Création des répertoires..."
+mkdir -p /mnt/{home,.snapshots,var/cache,efi,boot} 2>&1 || { echo "❌ Échec création répertoires !"; exit 1; }
+
+print_step "Création des subvolumes supplémentaires..."
+btrfs subvolume create /mnt/var/cache/xbps 2>&1 || { echo "❌ Échec création var/cache/xbps !"; exit 1; }
+btrfs subvolume create /mnt/var/tmp 2>&1 || { echo "❌ Échec création var/tmp !"; exit 1; }
+btrfs subvolume create /mnt/srv 2>&1 || { echo "❌ Échec création srv !"; exit 1; }
+
+print_step "Montage des partitions EFI et Boot..."
+mount -o rw,noatime "$EFI_PART" /mnt/efi 2>&1 || { echo "❌ Échec montage EFI !"; exit 1; }
+mount -o rw,noatime "$BOOT_PART" /mnt/boot 2>&1 || { echo "❌ Échec montage Boot !"; exit 1; }
+
+print_step "Vérification des points de montage :"
+df -h | grep /mnt
 
 # ============================================
 # 8. INSTALLATION
 # ============================================
-print_title "INSTALLATION"
+print_title "INSTALLATION DU SYSTÈME DE BASE"
+
+print_step "Copie des clés XBPS..."
 mkdir -p /mnt/var/db/xbps/keys
-cp /var/db/xbps/keys/* /mnt/var/db/xbps/keys/ 2>/dev/null || true
-XBPS_ARCH="$ARCH" xbps-install -S -R "$REPO" -r /mnt base-system linux-mainline btrfs-progs cryptsetup vim sudo
+cp /var/db/xbps/keys/* /mnt/var/db/xbps/keys/ 2>/dev/null || echo "⚠️ Aucune clé XBPS trouvée"
+
+print_step "Installation des paquets de base..."
+XBPS_ARCH="$ARCH" xbps-install -S -R "$REPO" -r /mnt base-system linux-mainline btrfs-progs cryptsetup vim sudo 2>&1 || {
+  echo "❌ Échec installation des paquets de base !"
+  echo "Vérifie ta connexion internet et le miroir : $REPO"
+  exit 1
+}
 
 # ============================================
 # 9. CHROOT
 # ============================================
 print_title "CONFIGURATION (CHROOT)"
+
+print_step "Préparation de l'environnement chroot..."
 for dir in dev proc sys run; do
-  mount --rbind /$dir /mnt/$dir
-  mount --make-rslave /mnt/$dir
+  mount --rbind /$dir /mnt/$dir 2>/dev/null || { echo "❌ Échec mount --rbind /$dir !"; exit 1; }
+  mount --make-rslave /mnt/$dir 2>/dev/null || { echo "❌ Échec mount --make-rslave !"; exit 1; }
 done
-cp /etc/resolv.conf /mnt/etc/ 2>/dev/null || true
+cp /etc/resolv.conf /mnt/etc/ 2>/dev/null || echo "⚠️ /etc/resolv.conf introuvable"
 
 # Export des variables pour le chroot
 export TIMEZONE HOSTNAME USERNAME LOCALE ROOT_PWD USER_PWD LUKS_PWD EFI_PART BOOT_PART BTRFS_OPTS
 
+print_step "Exécution des commandes dans le chroot..."
 chroot /mnt /bin/bash <<'CHROOT_EOF'
 # Timezone et Locale
 ln -sf /usr/share/zoneinfo/"$TIMEZONE" /etc/localtime
 sed -i "s|#$LOCALE|$LOCALE|" /etc/default/libc-locales
-xbps-reconfigure -f glibc-locales 2>/dev/null || true
+xbps-reconfigure -f glibc-locales 2>/dev/null || echo "⚠️ Erreur configuration locale"
 
 # Hostname
 echo "$HOSTNAME" > /etc/hostname
@@ -228,10 +304,13 @@ echo "%wheel ALL=(ALL:ALL) ALL" >> /etc/sudoers
 
 # Dépôts
 xbps-install -S
-xbps-install -y void-repo-nonfree 2>/dev/null || true
+xbps-install -y void-repo-nonfree 2>/dev/null || echo "⚠️ void-repo-nonfree introuvable"
 xbps-install -S
-xbps-install -y void-repo-multilib 2>/dev/null || true
+xbps-install -y void-repo-multilib 2>/dev/null || echo "⚠️ void-repo-multilib introuvable"
 xbps-install -S
+
+# intel-ucode
+xbps-install -Su intel-ucode 2>/dev/null || echo "⚠️ intel-ucode introuvable"
 
 # fstab
 EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
@@ -246,27 +325,44 @@ UUID=$EFI_UUID /efi vfat defaults,noatime 0 2
 tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0
 FSTABEOF
 
-# GRUB
+# GRUB avec support LUKS
 echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
 sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=""/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=4 rd.auto=1 rd.luks.allow-discards"/' /etc/default/grub
-xbps-install -y grub-x86_64-efi 2>/dev/null || true
-grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id="Void" 2>/dev/null || true
+xbps-install -y grub-x86_64-efi 2>/dev/null || echo "⚠️ grub-x86_64-efi introuvable"
+grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id="Void" 2>/dev/null || {
+  echo "❌ Échec installation GRUB !"
+  exit 1
+}
 
 # Services
 echo "hostonly=yes" >> /etc/dracut.conf
-ln -s /etc/sv/dhcpcd /var/service/ 2>/dev/null || true
-ln -s /etc/sv/NetworkManager /var/service/ 2>/dev/null || true
-xbps-reconfigure -fa 2>/dev/null || true
-xbps-install -y git NetworkManager 2>/dev/null || true
+ln -s /etc/sv/dhcpcd /var/service/ 2>/dev/null || echo "⚠️ dhcpcd introuvable"
+ln -s /etc/sv/NetworkManager /var/service/ 2>/dev/null || echo "⚠️ NetworkManager introuvable"
+xbps-reconfigure -fa 2>/dev/null || echo "⚠️ Erreur reconfiguration"
+xbps-install -y git NetworkManager 2>/dev/null || echo "⚠️ git/NetworkManager introuvable"
 CHROOT_EOF
 
 # ============================================
 # 10. FINALISATION
 # ============================================
 print_title "FINALISATION"
-umount -R /mnt 2>/dev/null || true
-cryptsetup close cryptroot 2>/dev/null || true
-echo -e "\n✅ INSTALLATION TERMINÉE ! Redémarre avec: reboot\n"
-read -p "Redémarrer maintenant ? [O/n] " -n 1 -r
-echo
-[[ $REPLY =~ ^[OoYy]$ ]] && reboot
+print_step "Démontage des partitions..."
+umount -R /mnt 2>/dev/null || echo "⚠️ Avertissement lors du démontage"
+
+print_step "Fermeture du conteneur LUKS..."
+cryptsetup close cryptroot 2>/dev/null || echo "⚠️ Avertissement fermeture LUKS"
+
+echo -e "\n=========================================="
+echo "  ✅ INSTALLATION TERMINÉE AVEC SUCCÈS !"
+echo "=========================================="
+echo ""
+echo "  Pour démarrer :"
+echo "  1. Redémarre : reboot"
+echo "  2. Au boot, entre le mot de passe LUKS"
+echo "  3. Connecte-toi avec :"
+echo "     - Utilisateur : $USERNAME"
+echo "     - Mot de passe : [celui que tu as configuré]"
+echo "=========================================="
+echo ""
+
+confirm "Redémarrer maintenant ?" && reboot
