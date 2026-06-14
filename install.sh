@@ -179,6 +179,12 @@ cryptsetup open --key-file "$LUKS_KEYFILE" "$ROOT_PART" cryptroot || {
   exit 1
 }
 
+print_step "Ajout du mot de passe LUKS..."
+echo "$LUKS_PWD" | cryptsetup luksAddKey "$ROOT_PART" - || {
+  echo "❌ Échec ajout mot de passe LUKS !"
+  exit 1
+}
+
 rm -f "$LUKS_KEYFILE"
 print_step "LUKS configuré avec succès."
 
@@ -265,6 +271,12 @@ UUID=$BOOT_UUID /boot ext2 defaults,noatime 0 2
 UUID=$EFI_UUID /efi vfat defaults,noatime 0 2
 tmpfs /tmp tmpfs defaults,nosuid,nodev 0 0
 FSTABEOF
+
+# Configure crypttab for LUKS
+ROOT_PART_UUID=$(blkid -s UUID -o value "$ROOT_PART")
+cat > /etc/crypttab <<CRYPTABEOF
+cryptroot UUID=$ROOT_PART_UUID none luks
+CRYPTABEOF
 
 echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
 sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT=""/GRUB_CMDLINE_LINUX_DEFAULT="loglevel=4 rd.auto=1 rd.luks.allow-discards"/' /etc/default/grub
